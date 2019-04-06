@@ -9,6 +9,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows;
+using System.IO;
 
 namespace VSslnToCMake
 {
@@ -64,6 +66,18 @@ namespace VSslnToCMake
             {
                 return path;
             }
+        }
+
+        public static bool FileCanOverwrite(string path)
+        {
+            if (File.Exists(path) &&
+                MessageBox.Show($"This file '{path}' already exists, do you want to overwrite it?",
+                                "VSslnToCMake",
+                                MessageBoxButton.YesNo) != MessageBoxResult.Yes)
+            {
+                return false;
+            }
+            return true;
         }
     }
 }

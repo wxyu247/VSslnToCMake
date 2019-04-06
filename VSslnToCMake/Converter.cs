@@ -38,35 +38,31 @@ namespace VSslnToCMake
 
         public override bool Convert(EnvDTE.DTE dte)
         {
-            var solutionInfoList = VerifySolution(dte);
-            if (solutionInfoList == null)
-            {
-                return false;
-            }
+            List<VCProjectInfo> prjInfoList = VCProjectInfo.MakeList(dte,TargetConfigurations, Platform);
+            if (prjInfoList.Count == 0) return false;
 
             logger.Info("Converting the projects");
 
+            var solutionDir = Path.GetDirectoryName(dte.Solution.FullName);
+            bool prjDirIsSlnDir = false;
             var cmProjects = new List<CMProject>();
-            foreach (var solutionInfo in solutionInfoList)
+
+            foreach (var prjInfo in prjInfoList)
             {
-                var cmProject = new CMProject(solutionInfo.project);
+                var cmProject = new CMProject(prjInfo);
                 cmProject.setLogger(logger);
-                cmProject.Platform = Platform;
-                cmProject.BuildConfigurations =
-                    solutionInfo.cfgs.Select(x => x.prjCfgName).ToArray();
-                foreach (var cfg in solutionInfo.cfgs)
-                {
-                    cmProject.SetSolutionConfigurationName(cfg.prjCfgName,
-                                                         cfg.slnCfgName);
-                }
                 if (!cmProject.Prepare())
                 {
                     return false;
                 }
                 cmProjects.Add(cmProject);
-            }
 
-            var solutionDir = Path.GetDirectoryName(dte.Solution.FullName);
+                if (!prjDirIsSlnDir &&
+                    Utility.NormalizePath(cmProject.CmakeListsDir) == Utility.NormalizePath(solutionDir))
+                {
+                    prjDirIsSlnDir = true;
+                }
+            }
 
             foreach (var cmProject in cmProjects)
             {
@@ -79,172 +75,30 @@ namespace VSslnToCMake
             logger.Info("Converting the projects - done");
 
             // Output CMakeLists.txt for the solution file.
-            logger.Info("Converting the solution");
-            logger.Info($"--- Converting {dte.Solution.FullName} ---");
             var cmakeListsPath = Path.Combine(solutionDir, "CMakeLists.txt");
-            var sw = new StreamWriter(cmakeListsPath);
-            sw.WriteLine($"cmake_minimum_required(VERSION {Constants.CMAKE_REQUIRED_VERSION})");
-            sw.WriteLine();
-            sw.WriteLine("project({0})",
-                         Path.GetFileNameWithoutExtension(
-                             dte.Solution.FileName));
-            sw.WriteLine();
-            foreach (var cmProject in cmProjects)
+            if (!prjDirIsSlnDir && Utility.FileCanOverwrite(cmakeListsPath))
             {
-                var projectDir = Path.GetDirectoryName(
-                    cmProject.Project.FileName);
-                var relativePath =
-                    Utility.ToRelativePath(projectDir, solutionDir);
-                sw.WriteLine($"add_subdirectory({relativePath})");
-            }
-
-            sw.Close();
-            logger.Info($"  {Path.GetFileNameWithoutExtension(dte.Solution.FullName)} -> {cmakeListsPath}");
-
-            logger.Info("Converting the solution - done");
-            return true;
-        }
-
-        class SolutionInfo
-        {
-            public Project project;
-            public (string slnCfgName, string prjCfgName)[] cfgs;
-        }
-
-        private List<SolutionInfo> VerifySolution(EnvDTE.DTE dte)
-        {
-            logger.Info("Checking the solution file");
-
-            // Verfify the target platform
-            if (Platform == "Any CPU")
-            {
-                logger.Error("Platform 'Any CPU' is not supported.");
-                return null;
-            }
-
-            // Verify that project configurations are same.
-            logger.Info("  Verifying that the configurations of the solution and projects match.");
-            var slnBuild = dte.Solution.SolutionBuild as SolutionBuild2;
-
-            if (TargetConfigurations == null)
-            {
-                TargetConfigurations = slnBuild.SolutionConfigurations
-                                       .Cast<SolutionConfiguration2>()
-                                       .Where(x => x.PlatformName == Platform)
-                                       .Select(x => x.Name).ToArray();
-            }
-
-            var projectNamesList = new List<List<string>>();
-            var cfgNamesList = new List<List<(string slnCfgName, string prjCfgName)>>();
-            SolutionConfigurations slnCfgs = slnBuild.SolutionConfigurations;
-            foreach (SolutionConfiguration2 slnCfg in slnCfgs)
-            {
-                if (slnCfg.PlatformName != Platform ||
-                    !TargetConfigurations.Contains(slnCfg.Name))
+                logger.Info("Converting the solution");
+                logger.Info($"--- Converting {dte.Solution.FullName} ---");
+                var sw = new StreamWriter(cmakeListsPath);
+                sw.WriteLine($"cmake_minimum_required(VERSION {Constants.CMAKE_REQUIRED_VERSION})");
+                sw.WriteLine();
+                sw.WriteLine("project({0})",
+                             Path.GetFileNameWithoutExtension(
+                                 dte.Solution.FileName));
+                sw.WriteLine();
+                foreach (var cmProject in cmProjects)
                 {
-                    continue;
+                    var relativePath = Utility.ToRelativePath(cmProject.CmakeListsDir, solutionDir);
+                    sw.WriteLine($"add_subdirectory({relativePath})");
                 }
 
-                var projectNames = new List<string>();
-                var cfgNames =
-                    new List<(string slnCfgName, string projectCfgName)>();
-                foreach (SolutionContext context in slnCfg.SolutionContexts)
-                {
-                    if (!context.ShouldBuild)
-                    {
-                        continue;
-                    }
-                    if (context.PlatformName != Platform)
-                    {
-                        logger.Error($"The platform of {context.ProjectName} does not match {Platform}.");
-                        return null;
-                    }
-                    if (context.ConfigurationName != slnCfg.Name)
-                    {
-                        logger.Info($"  Configuration of {context.ProjectName} does not match ones of the solution.");
-                        logger.Info($"    Solution: {slnCfg.Name}");
-                        logger.Info($"    Project: {context.ConfigurationName}");
-                        logger.Info($"  The configuration name '{context.ConfigurationName}' is replaced by '{slnCfg.Name}'.");
-                    }
-                    projectNames.Add(context.ProjectName);
-                    cfgNames.Add((slnCfg.Name, context.ConfigurationName));
-                }
-
-                if (projectNames.Count == 0)
-                {
-                    logger.Error(
-                        $"No project to build contains in configuration {slnCfg.Name}");
-                    return null;
-                }
-
-                projectNamesList.Add(projectNames);
-                cfgNamesList.Add(cfgNames);
+                sw.Close();
+                logger.Info($"  {Path.GetFileNameWithoutExtension(dte.Solution.FullName)} -> {cmakeListsPath}");
+                logger.Info("Converting the solution - done");
             }
             
-            if (projectNamesList.Count == 0)
-            {
-                logger.Error($"The solution file does not contain C/C++ projects on platform {Platform}.");
-                return null;
-            }
-
-            for (int i = 0; i < projectNamesList.Count; i++)
-            {
-                projectNamesList[i].Sort();
-                if (i > 0)
-                {
-                    if (!projectNamesList[i].SequenceEqual(projectNamesList[0]))
-                    {
-                        logger.Error($"The project configurations are different.");
-                        return null;
-                    }
-                }
-            }
-
-            //
-            string slnDir = Path.GetDirectoryName(dte.Solution.FullName);
-            var projectsFullPath = projectNamesList[0].ConvertAll(
-                x => Utility.NormalizePath(Path.Combine(slnDir, x))
-                     .ToLower());
-
-            Projects projects = dte.Solution.Projects;
-
-            // Verifying existance of VC++ project, and platform.
-            var solutionInfoList = new List<SolutionInfo>();
-            foreach (Project project in projects)
-            {
-                System.Console.WriteLine(project.Name);
-                System.Console.WriteLine(project.FileName);
-                System.Console.WriteLine(project.FullName);
-                VCProject vcprj = project.Object as VCProject;
-                if (vcprj == null)
-                {
-                    logger.Warn(
-                        $"Project '{project.Name}' is not a Visual C++ project.");
-                    continue;
-                }
-
-                var index = projectsFullPath.FindIndex(
-                    x => x == project.FullName.ToLower());
-                if (index < 0)
-                {
-                    continue;
-                }
-
-                var solutionInfo = new SolutionInfo();
-                solutionInfo.project = project;
-                solutionInfo.cfgs = cfgNamesList.Select(
-                    x => (x[index].slnCfgName, x[index].prjCfgName)).ToArray();
-
-                solutionInfoList.Add(solutionInfo);
-            }
-            if (solutionInfoList.Count() == 0)
-            {
-                logger.Error("No Visual C++ projects to build.");
-                return null;
-            }
-
-            logger.Info("Checking the solution file - done");
-            return solutionInfoList;
+            return true;
         }
     }
 }

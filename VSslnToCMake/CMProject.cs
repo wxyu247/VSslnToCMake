@@ -13,11 +13,69 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using EnvDTE;
+using EnvDTE80;
 using Microsoft.VisualStudio.VCProjectEngine;
 
 namespace VSslnToCMake
 {
     using SettingsPerConfig = Dictionary<string, Settings>;
+
+    class VCProjectInfo
+    {
+        private DTE dte;
+        private Project project;
+        private Dictionary<string, string> cfgPlatform = new Dictionary<string, string>();
+        private List<VCConfiguration> vcCfgs = new List<VCConfiguration>();
+
+        public Project Project => project;
+        public List<VCConfiguration> VcCfgs => vcCfgs;
+
+        public VCProjectInfo(EnvDTE.DTE dte, string projectUniqueName)
+        {
+            this.dte = dte;
+            project = dte.Solution.Projects.Item(projectUniqueName);
+        }
+
+        public static List<VCProjectInfo> MakeList(EnvDTE.DTE dte, string[] targetConfigurations, string platform)
+        {
+            List<VCProjectInfo> result = new List<VCProjectInfo>();
+            SolutionBuild2 slnBuild = dte.Solution.SolutionBuild as SolutionBuild2;
+            var slnCfgs = slnBuild.SolutionConfigurations.Cast<SolutionConfiguration2>().Where(x =>
+            {
+                return x.PlatformName == platform && targetConfigurations.Contains(x.Name);
+            }).ToArray();
+
+            foreach (var slnCfg in slnCfgs)
+            {
+                foreach (SolutionContext item in slnCfg.SolutionContexts)
+                {
+                    VCProjectInfo prjInfo = result.Find(x => x.project.UniqueName == item.ProjectName);
+                    if (prjInfo == null)
+                    {
+                        prjInfo = new VCProjectInfo(dte, item.ProjectName);
+                        result.Add(prjInfo);
+                    }
+                    prjInfo.cfgPlatform[item.ConfigurationName] = item.PlatformName;
+                }
+            }
+            foreach (var item in result)
+            {
+                item.MakeVCConfigurationList();
+            }
+            
+            return result;
+        }
+
+        private void MakeVCConfigurationList()
+        {
+            VCProject vcPrj = project.Object as VCProject;
+            foreach (var item in cfgPlatform)
+            {
+                var cfg = vcPrj.Configurations.Item(item.Key + "|" + item.Value);
+                vcCfgs.Add(cfg as VCConfiguration);
+            }
+        }
+    }
 
     static class GeneratorExpression
     {
@@ -156,15 +214,6 @@ namespace VSslnToCMake
 
     class CMProject
     {
-        /// <summary>
-        /// Target platform
-        /// </summary>
-        public string Platform { get; set; }
-
-        /// <summary>
-        /// Target configurations
-        /// </summary>
-        public string[] BuildConfigurations { get; set; }
 
         /// <summary>
         /// Target name
@@ -172,31 +221,25 @@ namespace VSslnToCMake
         public string TargetName { get { return targetName; } }
 
         /// <summary>
-        /// Type of output this project generates.
+        /// Directory to output CMakeLists.txt
         /// </summary>
-        public ConfigurationTypes ConfigurationType { get { return vcCfgs[0].ConfigurationType; } }
- 
-        public Project Project { get { return project; } }
+        public string CmakeListsDir { get => cmakeListsDir; }
 
+        private VCProjectInfo vcProjectInfo;
         private Logger logger = new NullLogger();
-        // Key: Configuration name to be convert
-        // Value: Output configuration name
-        private Dictionary<string, string> solutionConfigurationNames;
-        private Project project;
-        private VCProject vcProject;
-        private List<VCConfiguration> vcCfgs;
-        private SettingsPerConfig projectSettingsPerConfig;
+        private SettingsPerConfig projectSettingsPerConfig = new SettingsPerConfig();
         private List<CMFile> srcs;
         private List<CMFile> hdrs;
         private List<CMFile> resources;
         private string cmakeListsDir;
         private string targetName;
 
-        public CMProject(EnvDTE.Project project)
+        public CMProject(VCProjectInfo projectInfo)
         {
-            Platform = "x64";
-            this.project = project;
-            this.vcProject = project.Object as VCProject;
+            vcProjectInfo = projectInfo;
+            cmakeListsDir = Path.GetDirectoryName(vcProjectInfo.Project.FullName);
+            cmakeListsDir = ModifyPath(cmakeListsDir);
+            targetName = vcProjectInfo.Project.Name;
         }
 
         public void setLogger(Logger logger)
@@ -204,102 +247,35 @@ namespace VSslnToCMake
             this.logger = logger;
         }
 
-        public void SetSolutionConfigurationName(
-            string projectConfigurationName, string solutionConfigurationName)
-        {
-            if (BuildConfigurations == null)
-            {
-                return;
-            }
-            if (BuildConfigurations.Contains(projectConfigurationName))
-            {
-                if (solutionConfigurationNames == null)
-                {
-                    solutionConfigurationNames = new Dictionary<string, string>();
-                }
-                solutionConfigurationNames[projectConfigurationName] =
-                    solutionConfigurationName;
-            }
-        }
-
         public Dictionary<string, string> getOutputPaths()
         {
-            return vcCfgs.ToDictionary(
-                x => solutionConfigurationNames[x.ConfigurationName],
+            return vcProjectInfo.VcCfgs.ToDictionary(
+                x => x.ConfigurationName,
                 x => x.Evaluate(x.PrimaryOutput));
         }
 
         public Dictionary<string, string> getImportLibraries()
         {
-            return vcCfgs.ToDictionary(
-                x => solutionConfigurationNames[x.ConfigurationName],
+            return vcProjectInfo.VcCfgs.ToDictionary(
+                x => x.ConfigurationName,
                 x => x.Evaluate(x.ImportLibrary));
         }
 
         public bool Prepare()
         {
-            targetName = project.Name;
-
-            // Directory to output CMakeLists.txt
-            cmakeListsDir = System.IO.Path.GetDirectoryName(project.FullName);
-            cmakeListsDir = ModifyPath(cmakeListsDir);
-
-            // Target configurations
-            var cfgs = vcProject.Configurations as IVCCollection;
-            if (BuildConfigurations == null)
-            {
-                vcCfgs = cfgs.Cast<VCConfiguration>().Where(
-                    x => x.Platform.Name == Platform).ToList();
-                BuildConfigurations =
-                    vcCfgs.Select(x => x.ConfigurationName).ToArray();
-            }
-            else
-            {
-                vcCfgs = new List<VCConfiguration>();
-                foreach (var buildConfig in BuildConfigurations)
-                {
-                    var name = buildConfig + "|" + Platform;
-                    var cfg = cfgs.Item(name);
-                    if (cfg == null)
-                    {
-                        OutputError($"Project '{project.Name}' does not contain the configuration '{name}'.");
-                        return false;
-                    }
-                    vcCfgs.Add(cfg as VCConfiguration);
-                }
-            }
-
-            // Output configuration names
-            // If the output configuration names are not set,
-            // they are the same as the build configuration names.
-            if (solutionConfigurationNames == null)
-            {
-                solutionConfigurationNames =
-                    BuildConfigurations.ToDictionary(x => x, x => x);
-            }
-            else
-            {
-                foreach (var cfgName in BuildConfigurations)
-                {
-                    if (!solutionConfigurationNames.ContainsKey(cfgName))
-                    {
-                        solutionConfigurationNames.Add(cfgName, cfgName);
-                    }
-                }
-            }
 #if DEBUG
             Trace.WriteLine("--- Build Configurations ---");
             Trace.Indent();
-            vcCfgs.ForEach(x => Trace.WriteLine(x.Name));
+            vcProjectInfo.VcCfgs.ForEach(x => Trace.WriteLine(x.Name));
             Trace.Unindent();
 #endif
 
             // Make sure that the type of output are same in all configurations
-            if (vcCfgs.Select(x => x.ConfigurationType).Distinct().Count() != 1)
+            if (vcProjectInfo.VcCfgs.Select(x => x.ConfigurationType).Distinct().Count() != 1)
             {
                 var sb = new StringBuilder();
                 sb.AppendLine("Mismatch the type of output:");
-                foreach (var vcCfg in vcCfgs)
+                foreach (var vcCfg in vcProjectInfo.VcCfgs)
                 {
                     switch (vcCfg.ConfigurationType)
                     {
@@ -316,16 +292,16 @@ namespace VSslnToCMake
                             break;
                     }
                 }
-                OutputError("Mismatch the type of output:");
+                OutputError(sb.ToString());
                 return false;
             }
 
             // Make sure that 'Use of MFC' are same in all configurations.
-            if (vcCfgs.Select(x => x.useOfMfc).Distinct().Count() != 1)
+            if (vcProjectInfo.VcCfgs.Select(x => x.useOfMfc).Distinct().Count() != 1)
             {
                 var sb = new StringBuilder();
                 sb.AppendLine("Mismatch 'Use of MFC':");
-                vcCfgs.ForEach(
+                vcProjectInfo.VcCfgs.ForEach(
                     vcCfg =>
                     sb.AppendLine($"  {vcCfg.useOfMfc} ({vcCfg.Name})"));
                 OutputError(sb.ToString());
@@ -336,27 +312,30 @@ namespace VSslnToCMake
             srcs = new List<CMFile>();
             hdrs = new List<CMFile>();
             resources = new List<CMFile>();
-            ExtractSourceFiles(project);
+            ExtractSourceFiles(vcProjectInfo.Project);
 
             return true;
         }
 
         public bool Convert(string cmakeSourceDir, List<CMProject> cmProjects)
         {
-            logger.Info($"--- Converting {Project.FullName} ---");
+            logger.Info($"--- Converting {vcProjectInfo.Project.FullName} ---");
 
             // XML document of the project file to extract settings
             // not provided by COM interfaces.
             var xml = CreateXmlDocumentOfVcxproj();
 
-            projectSettingsPerConfig = vcCfgs.ToDictionary(
-                vcCfg => vcCfg.ConfigurationName, vcCfg => new Settings());
-
+            //projectSettingsPerConfig = vcProjectInfo.vcCfgs.ToDictionary(
+            //    vcCfg => vcCfg.ConfigurationName, vcCfg => new Settings());
+            foreach (var item in vcProjectInfo.VcCfgs)
+            {
+                projectSettingsPerConfig.Add(item.ConfigurationName, new Settings());
+            }
             ExtractProjectSettings(xml);
             ExtractFileSettings(xml);
             if (WriteCMakeLists(cmakeSourceDir, cmProjects))
             {
-                logger.Info($"  {Project.Name} -> {System.IO.Path.Combine(cmakeListsDir, "CMakeLists.txt")}");
+                logger.Info($"  {vcProjectInfo.Project.Name} -> {System.IO.Path.Combine(cmakeListsDir, "CMakeLists.txt")}");
             }
 
             return true;
@@ -376,7 +355,7 @@ namespace VSslnToCMake
                 string text;
                 {
                     var xmlOrg = new System.Xml.XmlDocument();
-                    xmlOrg.Load(project.FullName);
+                    xmlOrg.Load(vcProjectInfo.Project.FullName);
 
                     var sw = new StringWriter();
                     var tx = new System.Xml.XmlTextWriter(sw);
@@ -397,7 +376,7 @@ namespace VSslnToCMake
             }
             catch (System.Xml.XmlException e)
             {
-                OutputError($"Failed to load {project.FullName}");
+                OutputError($"Failed to load {vcProjectInfo.Project.FullName}");
                 OutputError(e.Message);
             }
             return null;
@@ -448,7 +427,7 @@ namespace VSslnToCMake
 
         private void ExtractProjectSettings(System.Xml.XmlDocument xml)
         {
-            foreach (var vcCfg in vcCfgs)
+            foreach (var vcCfg in vcProjectInfo.VcCfgs)
             {
                 var settings = projectSettingsPerConfig[vcCfg.ConfigurationName];
                 VCCLCompilerTool ctool = vcCfg.Tools.Item("VCCLCompilerTool");
@@ -542,17 +521,13 @@ namespace VSslnToCMake
                                                System.Xml.XmlDocument xml)
         {
             var fileCfgs = srcFile.vcFile.FileConfigurations as IVCCollection;
-            foreach (string configName in BuildConfigurations)
+            foreach (var vcCfg in vcProjectInfo.VcCfgs)
             {
-                var vcCfg = vcCfgs.Find(x => x.ConfigurationName == configName);
-                Debug.Assert(vcCfg != null);
-
-                VCFileConfiguration vcFileCfg =
-                    fileCfgs.Item(configName + "|" + Platform);
+                VCFileConfiguration vcFileCfg = fileCfgs.Item(vcCfg.Name);
                 Debug.Assert(vcFileCfg != null);
 
                 var settings = new Settings();
-                srcFile.settingsPerConfig.Add(configName, settings);
+                srcFile.settingsPerConfig.Add(vcCfg.ConfigurationName, settings);
 
                 VCCLCompilerTool ctool = vcFileCfg.Tool;
 
@@ -597,33 +572,6 @@ namespace VSslnToCMake
         private bool WriteCMakeLists(string solutionDir,
                                      List<CMProject> cmProjects)
         {
-            // Make sure that the type of output are same in all configurations
-            if (vcCfgs.Select(x => x.ConfigurationType).Distinct().Count() != 1)
-            {
-                var sbError = new StringBuilder();
-                sbError.AppendLine("Mismatch the type of output:");
-                foreach (var vcCfg in vcCfgs)
-                {
-                    switch (vcCfg.ConfigurationType)
-                    {
-                        case ConfigurationTypes.typeApplication:
-                            sbError.Append($"  executable");
-                            break;
-                        case ConfigurationTypes.typeDynamicLibrary:
-                            sbError.Append($"  dynamic link library");
-                            break;
-                        case ConfigurationTypes.typeStaticLibrary:
-                            sbError.Append($"  static link library");
-                            break;
-                        default:
-                            break;
-                    }
-                    sbError.AppendLine($" ({vcCfg.Name})");
-                }
-                OutputError(sbError.ToString());
-                return false;
-            }
-
             var sbh = new StringBuilder(); // For header
             var sb = new StringBuilder();  // For body
 
@@ -636,27 +584,27 @@ namespace VSslnToCMake
             // Configuration types
             sb.AppendFormat(
                 "set(CMAKE_CONFIGURATION_TYPES \"{0}\"",
-                string.Join(";", solutionConfigurationNames.Values));
+                string.Join(";", vcProjectInfo.VcCfgs.Select(x => x.ConfigurationName)));
             sb.AppendLine();
             sb.AppendLine("    CACHE STRING \"Configuration types\" FORCE)");
             sb.AppendLine();
 
             // MFC
-            if (vcCfgs[0].useOfMfc == useOfMfc.useMfcDynamic ||
-                vcCfgs[0].useOfMfc == useOfMfc.useMfcStatic)
+            if (vcProjectInfo.VcCfgs[0].useOfMfc == useOfMfc.useMfcDynamic ||
+                vcProjectInfo.VcCfgs[0].useOfMfc == useOfMfc.useMfcStatic)
             {
                 sb.AppendLine("# Use of MFC");
-                sb.AppendFormat($@"set(CMAKE_MFC_FLAG {(vcCfgs[0].useOfMfc == useOfMfc.useMfcStatic ? 1 : 2)})");
+                sb.AppendFormat($@"set(CMAKE_MFC_FLAG {(vcProjectInfo.VcCfgs[0].useOfMfc == useOfMfc.useMfcStatic ? 1 : 2)})");
                 sb.AppendLine();
                 sb.AppendLine();
             }
 
             // Source file names
-            switch (vcCfgs[0].ConfigurationType)
+            switch (vcProjectInfo.VcCfgs[0].ConfigurationType)
             {
                 case ConfigurationTypes.typeApplication:
                     sb.AppendLine($"add_executable({targetName}");
-                    VCLinkerTool linkerTool = vcCfgs[0].Tools.Item("VCLinkerTool");
+                    VCLinkerTool linkerTool = vcProjectInfo.VcCfgs[0].Tools.Item("VCLinkerTool");
                     if (linkerTool.SubSystem == subSystemOption.subSystemWindows)
                     {
                         sb.AppendLine("  WIN32");
@@ -769,8 +717,9 @@ namespace VSslnToCMake
                 sbh.AppendLine("endforeach ()");
             }
 
-            var cmakeListsPath =
-                System.IO.Path.Combine(cmakeListsDir, "CMakeLists.txt");
+            var cmakeListsPath = Path.Combine(cmakeListsDir, "CMakeLists.txt");
+            if (!Utility.FileCanOverwrite(cmakeListsPath)) return false;
+
             var sw = new System.IO.StreamWriter(cmakeListsPath);
             sw.Write(sbh.ToString());
             sw.Write(sb.ToString().Trim());
@@ -782,7 +731,7 @@ namespace VSslnToCMake
 
         private string BuildOutputFileNamesString()
         {
-            if (vcCfgs.All(
+            if (vcProjectInfo.VcCfgs.All(
                     vcCfg =>
                     {
                         var fileName = Path.GetFileNameWithoutExtension(vcCfg.PrimaryOutput);
@@ -797,9 +746,9 @@ namespace VSslnToCMake
             sb.AppendLine();
             sb.AppendFormat( "  PROPERTIES");
             sb.AppendLine();
-            foreach (var vcCfg in vcCfgs)
+            foreach (var vcCfg in vcProjectInfo.VcCfgs)
             {
-                var configUpper = solutionConfigurationNames[vcCfg.ConfigurationName].ToUpper();
+                var configUpper = vcCfg.ConfigurationName.ToUpper();
                 var fileName = System.IO.Path.GetFileNameWithoutExtension(vcCfg.PrimaryOutput);
                 sb.AppendFormat($"  OUTPUT_NAME_{configUpper} {fileName}");
                 sb.AppendLine();
@@ -808,15 +757,6 @@ namespace VSslnToCMake
 
             return sb.ToString();
         }
-
-        private string GetSolutionConfigurationName<Value>(KeyValuePair<string, Value> kv)
-        {
-            return solutionConfigurationNames[kv.Key];
-        }
-
-        private string GetSolutionConfigurationName<Value>((string, Value) kv) => solutionConfigurationNames[kv.Item1];
-
-        private string GetSolutionConfigurationName(string name) => solutionConfigurationNames[name];
 
         private string BuildAdditionalIncludeDirectoriesString(
             string solutionDir)
@@ -827,7 +767,7 @@ namespace VSslnToCMake
             var dirsPerCfg = new List<(string cfgName, List<string> paths)>();
             foreach (var kvp in projectSettingsPerConfig)
             {
-                var vcCfg = vcCfgs.Find(x => x.ConfigurationName == kvp.Key);
+                var vcCfg = vcProjectInfo.VcCfgs.Find(x => x.ConfigurationName == kvp.Key);
                 Debug.Assert(vcCfg != null);
                 var settings = kvp.Value;
                 var paths = EvaluateDirectories(settings.addIncDirs, vcCfg,
@@ -847,7 +787,7 @@ namespace VSslnToCMake
             sb.AppendFormat("  {0}",
                 dirsPerCfg.ConfigExpressions(
                     Environment.NewLine + "  ",
-                    GetSolutionConfigurationName,
+                    kv => kv.cfgName,
                     kv => Environment.NewLine + "    " + 
                           string.Join(";" + Environment.NewLine + "    ",
                                       kv.paths)));
@@ -866,7 +806,7 @@ namespace VSslnToCMake
             sb.AppendLine($"target_compile_definitions({targetName} PRIVATE");
             sb.AppendFormat("  {0}",
                 cfgNames.ConfigExpressions(
-                    Environment.NewLine + "  ", GetSolutionConfigurationName,
+                    Environment.NewLine + "  ", cfgName => cfgName,
                     (cfgName) => string.Join(";", projectSettingsPerConfig[cfgName].preprocessorDefs)));
             sb.AppendLine();
             sb.AppendLine(")");
@@ -910,7 +850,7 @@ namespace VSslnToCMake
                         src.settingsPerConfig
                             .Where(kv => kv.Value.preprocessorDefs.Count() > 0)
                             .Select(kv => (
-                                solutionConfigurationNames[kv.Key],
+                                kv.Key,
                                 string.Join(
                                     ";", kv.Value.preprocessorDefs.Select(pp => "-D" + pp))))));
                 sb.AppendLine();
@@ -934,7 +874,7 @@ namespace VSslnToCMake
                     "  \"{0}\"",
                     cfgNames.ConfigExpressions(
                         "\"" + System.Environment.NewLine + "  \"",
-                        GetSolutionConfigurationName,
+                        cfgName => cfgName,
                         cfgName => {
                             bool b = (bool)projectSettingsPerConfig[cfgName].sdlCheck;
                             return b ? "/sdl" : "/sdl-";
@@ -960,7 +900,7 @@ namespace VSslnToCMake
                     {
                         sb.AppendFormat(
                             "  \"$<$<CONFIG:{0}>:{1}>\"",
-                            solutionConfigurationNames[kv.Key],
+                            kv.Key,
                             (bool)kv.Value.sdlCheck ? "/sdl" : "/sdl-");
                         sb.AppendLine();
                     }
@@ -986,7 +926,7 @@ namespace VSslnToCMake
                     "  \"{0}\"",
                     cfgNames.ConfigExpressions(
                         "\"" + System.Environment.NewLine + "  \"",
-                        GetSolutionConfigurationName,
+                        cfgName => cfgName,
                         cfgName => {
                             bool b = (bool)projectSettingsPerConfig[cfgName].minimalRebuild;
                             return b ? "/Gm" : "/Gm-";
@@ -1017,7 +957,7 @@ namespace VSslnToCMake
                     {
                         sb.AppendFormat(
                             "  \"$<$<CONFIG:{0}>:{1}>\"",
-                            solutionConfigurationNames[kv.Key],
+                            kv.Key,
                             (bool)kv.Value.minimalRebuild ? "/Gm" : "/Gm-");
                         sb.AppendLine();
                     }
@@ -1067,7 +1007,7 @@ namespace VSslnToCMake
                         .Where(kv => kv.Value == true)
                         .ConfigExpressions(
                             "\"" + System.Environment.NewLine + "  \"",
-                            GetSolutionConfigurationName, kv => "/MP"));
+                            kv => kv.Key, kv => "/MP"));
                 sb.AppendLine();
                 sb.AppendLine(")");
             }
@@ -1095,7 +1035,7 @@ namespace VSslnToCMake
                         "  \"{0}\"",
                         cfgNames.ConfigExpressions(
                             "\"" + System.Environment.NewLine + "  \"",
-                            GetSolutionConfigurationName, kv => "/MP"));
+                            cfgName => cfgName, kv => "/MP"));
                     sb.AppendLine();
                     sb.AppendLine(")");
                 }
@@ -1167,7 +1107,7 @@ namespace VSslnToCMake
                         "  \"{0}\")",
                         cfgAndPchList.ConfigExpressions(
                             "\\" + Environment.NewLine + "   ",
-                            kv => solutionConfigurationNames[kv.Item1],
+                            kv => kv.Item1,
                             kv => kv.Item2));
                     sb.AppendLine();
                 }
@@ -1181,7 +1121,7 @@ namespace VSslnToCMake
                 // Project settings
                 var opt = projectSettingsPerConfig.ConfigExpressions(
                     "\"" + Environment.NewLine + "  \"",
-                    GetSolutionConfigurationName,
+                    kv => kv.Key,
                     kv => kv.Value.pch.BuildPchOptionString());
                 if (opt != "")
                 {
@@ -1203,7 +1143,7 @@ namespace VSslnToCMake
 
                     opt = BuildConfigurationExpressions(
                         src.settingsPerConfig.Select(
-                            kv => (solutionConfigurationNames[kv.Key],
+                            kv => (kv.Key,
                                    kv.Value.pch.BuildPchOptionString())));
                     if (opt != "")
                     {
@@ -1270,7 +1210,7 @@ namespace VSslnToCMake
             var dirsPerCfg = new List<(string cfgName, List<string> paths)>();
             foreach (var kvp in projectSettingsPerConfig)
             {
-                var vcCfg = vcCfgs.Find(x => x.ConfigurationName == kvp.Key);
+                var vcCfg = vcProjectInfo.VcCfgs.Find(x => x.ConfigurationName == kvp.Key);
                 Debug.Assert(vcCfg != null);
                 var settings = kvp.Value;
                 var paths = EvaluateDirectories(settings.addLibDirs, vcCfg,
@@ -1292,7 +1232,7 @@ namespace VSslnToCMake
                 {
                     continue;
                 }
-                sb.AppendLine($"  $<$<CONFIG:{solutionConfigurationNames[cfgName]}>:");
+                sb.AppendLine($"  $<$<CONFIG:{cfgName}>:");
                 foreach (var path in paths)
                 {
                     sb.Append($"    {option}{path}");
@@ -1372,7 +1312,7 @@ namespace VSslnToCMake
                 var linkOptions = new List<string>();
                 foreach (var linkLibOrg in settings.linkLibs)
                 {
-                    var vcCfg = vcCfgs.Find(x => x.ConfigurationName == cfgName);
+                    var vcCfg = vcProjectInfo.VcCfgs.Find(x => x.ConfigurationName == cfgName);
                     string linkLib = TranslatePath(linkLibOrg, vcCfg);
                     List<string> linkLibFullPaths;
 
@@ -1401,7 +1341,7 @@ namespace VSslnToCMake
                             }
 
                             Dictionary<string, string> candidateLibs = null;
-                            switch (cmProject.ConfigurationType)
+                            switch (cmProject.vcProjectInfo.VcCfgs[0].ConfigurationType)
                             {
                                 case ConfigurationTypes.typeStaticLibrary:
                                     candidateLibs = cmProject.getOutputPaths();
@@ -1442,7 +1382,7 @@ namespace VSslnToCMake
                 }
 
                 sb.AppendFormat("  \"$<$<CONFIG:{0}>:{1}>\"",
-                                solutionConfigurationNames[cfgName],
+                                cfgName,
                                 string.Join(";", linkOptions));
                 sb.AppendLine();
             }
