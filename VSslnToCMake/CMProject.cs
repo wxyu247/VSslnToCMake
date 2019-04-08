@@ -39,10 +39,13 @@ namespace VSslnToCMake
         public static List<VCProjectInfo> MakeList(EnvDTE.DTE dte, string[] targetConfigurations, string platform)
         {
             List<VCProjectInfo> result = new List<VCProjectInfo>();
+            if (dte == null || platform == null) return result;
+
             SolutionBuild2 slnBuild = dte.Solution.SolutionBuild as SolutionBuild2;
             var slnCfgs = slnBuild.SolutionConfigurations.Cast<SolutionConfiguration2>().Where(x =>
             {
-                return x.PlatformName == platform && targetConfigurations.Contains(x.Name);
+                return x.PlatformName == platform &&
+                    (targetConfigurations == null || targetConfigurations.Contains(x.Name));
             }).ToArray();
 
             foreach (var slnCfg in slnCfgs)
@@ -58,22 +61,25 @@ namespace VSslnToCMake
                     prjInfo.cfgPlatform[item.ConfigurationName] = item.PlatformName;
                 }
             }
-            foreach (var item in result)
-            {
-                item.MakeVCConfigurationList();
-            }
-            
-            return result;
+
+            return result.Where(x => x.MakeVCConfigurationList()).ToList();
         }
 
-        private void MakeVCConfigurationList()
+        private bool MakeVCConfigurationList()
         {
             VCProject vcPrj = project.Object as VCProject;
+            if (vcPrj == null)
+            {
+                System.Windows.MessageBox.Show($"Project '{project.Name}' is not a Visual C++ project.", "VSslnToCMake");
+                return false;
+            }
+
             foreach (var item in cfgPlatform)
             {
                 var cfg = vcPrj.Configurations.Item(item.Key + "|" + item.Value);
                 vcCfgs.Add(cfg as VCConfiguration);
             }
+            return true;
         }
     }
 
