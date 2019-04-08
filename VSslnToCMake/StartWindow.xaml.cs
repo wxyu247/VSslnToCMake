@@ -70,6 +70,10 @@ namespace VSslnToCMake
         {
             this.platformComboBox.ItemsSource = targetPlatforms;
             this.platformComboBox.SelectedItem = "x64";
+            if (platformComboBox.SelectedIndex == -1 && platformComboBox.Items.Count > 0)
+            {
+                platformComboBox.SelectedIndex = 0;
+            }
 
             var items = targetConfigurations.Select(
                 x =>

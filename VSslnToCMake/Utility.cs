@@ -70,6 +70,7 @@ namespace VSslnToCMake
 
         public static bool FileCanOverwrite(string path)
         {
+            path = NormalizePath(path);
             if (File.Exists(path) &&
                 MessageBox.Show($"This file '{path}' already exists, do you want to overwrite it?",
                                 "VSslnToCMake",

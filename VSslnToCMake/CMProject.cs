@@ -120,20 +120,22 @@ namespace VSslnToCMake
         private const string DEFAULT_HEADER_FILE_PATH = "stdafx.h";
 
         public pchOption use = pchOption.pchNone;
-        public string pchFilePath;
+        private string pchFilePath;
         public string headerFilePath;
+
+        public string PchFilePath { get => pchFilePath; set => pchFilePath = Utility.ToUnixPath(value); }
 
         public static bool operator == (PchSetting lhs, PchSetting rhs)
         {
             return lhs.use == rhs.use &&
-                   lhs.pchFilePath == rhs.pchFilePath &&
+                   lhs.PchFilePath == rhs.PchFilePath &&
                    lhs.headerFilePath == rhs.headerFilePath;
         }
 
         public static bool operator != (PchSetting lhs, PchSetting rhs)
         {
             return lhs.use != rhs.use ||
-                   lhs.pchFilePath != rhs.pchFilePath ||
+                   lhs.PchFilePath != rhs.PchFilePath ||
                    lhs.headerFilePath != rhs.headerFilePath;
         }
 
@@ -161,9 +163,9 @@ namespace VSslnToCMake
             {
                 option += string.Format($"{headerFilePath}");
             }
-            if (pchFilePath != DEFAULT_PCH_FILE_PATH)
+            if (PchFilePath != DEFAULT_PCH_FILE_PATH)
             {
-                option += string.Format($" /Fp{pchFilePath}");
+                option += string.Format($" /Fp{PchFilePath}");
             }
             return option;
         }
@@ -475,7 +477,7 @@ namespace VSslnToCMake
                 // Precompiled header file
                 settings.pch = new PchSetting {
                     use = ctool.UsePrecompiledHeader,
-                    pchFilePath = ctool.PrecompiledHeaderFile,
+                    PchFilePath = ctool.PrecompiledHeaderFile,
                     headerFilePath = ctool.PrecompiledHeaderThrough
                 };
 
@@ -545,7 +547,7 @@ namespace VSslnToCMake
                 // Precompiled header file
                 settings.pch = new PchSetting {
                     use = ctool.UsePrecompiledHeader,
-                    pchFilePath = ctool.PrecompiledHeaderFile,
+                    PchFilePath = ctool.PrecompiledHeaderFile,
                     headerFilePath = ctool.PrecompiledHeaderThrough
                 };
 
